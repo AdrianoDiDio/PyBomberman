@@ -1,28 +1,31 @@
 import pygame
 import Globals
 import Inputbox
+import enum
 import xml.etree.ElementTree
 from pygame import Rect
 import socket
-from Globals import IsConnected
-import sys
-import json
-import pickle
 import random
-import math
+import pickle
 import uuid
-import struct
+import math
 
 ImageCache = {}
 MenuFont = None
 NumFrames = 0
 
 class MapObject(object):
-    def __init__(self):
-        self.x = 0
-        self.y = 0
+    def Draw(self,Screen):
+        if self.PowerUp is not Globals.PowerupType.PW_NONE :
+            Screen.blit(ImageCache[Globals.PowerupType(self.PowerUp).name], (self.x, self.y))
+            return
+        Screen.blit(ImageCache['FixedTile'], (self.x, self.y))
+    def __init__(self,x = 0,y = 0,PowerUp = Globals.PowerupType.PW_NONE):
+        self.x = x
+        self.y = y
         self.Breakable = False
         self.Remove = False
+        self.PowerUp = PowerUp;
 
 class Explosion(object):
   #def TimeToDraw(self) :
@@ -67,7 +70,13 @@ class Explosion(object):
     
 
 class Bomb(object):
-    
+    def AdjustOwnerBombCount(self):
+        global Players
+        for player in Players :
+            if not(player.Used) :
+                continue
+            if player.ID == self.OwnerID :
+                player.NumUsedBombs -= 1
     def Explode(self):
         global Players
         # Determine if we have to remove any tile within our range.
@@ -78,8 +87,11 @@ class Bomb(object):
                continue
             TRect = Rect(Tile.x, Tile.y, 32, 32)
             if TRect.collidelist(BRects) != -1 :
+                RandomPowerUp = Globals.PowerupType(random.choice(list(Globals.PowerupType)))
+                if(  not(RandomPowerUp == Globals.PowerupType.PW_NONE) ) :
+                    Map.append(MapObject(Tile.x,Tile.y,RandomPowerUp))
                 Map.remove(Tile)
-                
+        self.AdjustOwnerBombCount()
         for player in Players :
             PRect = Rect(player.x, player.y, 32, 32)
             if PRect.collidelist(BRects) != -1 or (player.x == self.x and player.y == self.y):
@@ -137,51 +149,94 @@ class Player(object):
     '''
     classdocs
     '''
-    
+
+    class Direction(enum.IntEnum):
+        DIR_FRONT = 1
+        DIR_BACK = 2
+        DIR_LEFT = 3
+        DIR_RIGHT = 4
+
+
+    def CollectPowerUp(self,Tile):
+        if Tile.PowerUp == Globals.PowerupType.PW_BOMB :
+            self.NumBombs += 1
+        if Tile.PowerUp == Globals.PowerupType.PW_SPEED:
+            self.ChangeSpeed(8)
+        if Tile.PowerUp == Globals.PowerupType.PW_RANGE:
+            self.BombRange += 16
+        Map.remove(Tile)
+
+
     def CheckCollisions(self):
         Player = Rect(self.x, self.y, 32, 32)
         for Tile in Map :
             TileRect = Rect(Tile.x, Tile.y, 32, 32)
-            if TileRect.colliderect(Player) :
+            HasCollided = Player.colliderect(TileRect)
+            if HasCollided:
+                if( Tile.PowerUp is not Globals.PowerupType.PW_NONE) :
+                    self.CollectPowerUp(Tile)
+                    return False
+                if self.Dir == self.Direction.DIR_LEFT:
+                    self.x = TileRect.right
+                if self.Dir == self.Direction.DIR_RIGHT:
+                    self.x = TileRect.left - Player.width
+                if self.Dir == self.Direction.DIR_FRONT:
+                    self.y =  TileRect.top - Player.height
+                if self.Dir == self.Direction.DIR_BACK:
+                    self.y = TileRect.bottom
                 return True
         return False
-    
-    def Move(self, Key):
+    def Move(self,Key):
+        LocalKey = pygame.key.get_pressed()
+        if LocalKey[pygame.K_RIGHT]:
+            self.Dir = self.Direction.DIR_RIGHT
+            self.x += self.Speed
+            self.CheckCollisions()
+        if LocalKey[pygame.K_LEFT]:
+            self.Dir = self.Direction.DIR_LEFT
+            self.x -= self.Speed
+            self.CheckCollisions()
+        if LocalKey[pygame.K_UP]:
+            self.Dir = self.Direction.DIR_BACK
+            self.y -= self.Speed
+            self.CheckCollisions()
+        if LocalKey[pygame.K_DOWN]:
+            self.Dir = self.Direction.DIR_FRONT
+            self.y += self.Speed
+            self.CheckCollisions()
+        if LocalKey[pygame.K_SPACE]:
+            if self.NumUsedBombs < self.NumBombs :
+                if AddBomb(self.ID, self.x, self.y):
+                    for player in Players:
+                        if player.ID == self.ID:
+                            continue
+                        if not (player.Used):
+                            continue
+                        NetInterface.PackAndWriteOp(Globals.NetworkOP.OP_ADDBOMB,
+                                                pickle.dumps((self.ID, self.x, self.y)), player.Address)
+                    self.NumUsedBombs += 1
+        if LocalKey[pygame.K_PLUS] :
+            self.ChangeSpeed(8)
+        if LocalKey[pygame.K_MINUS]:
+            self.ChangeSpeed(-8)
 
-        if Key == pygame.K_RIGHT :
-            self.x += 16
-            if self.CheckCollisions() :
-                self.x -= 16
-        if Key == pygame.K_LEFT :
-            self.x -= 16
-            if self.CheckCollisions() :
-                self.x += 16
-        if Key == pygame.K_UP :
-            self.y -= 16
-            if self.CheckCollisions() :
-                self.y += 16
-        if Key == pygame.K_DOWN :
-            self.y += 16
-            if self.CheckCollisions() :
-                self.y -= 16
-        if Key == pygame.K_SPACE :
-            
-            if AddBomb(self.ID, self.x, self.y) :
-                for player in Players :
-                    if player.ID == self.ID :
-                        continue
-                    if not(player.Used) :
-                        continue
-                    NetInterface.PackAndWriteOp(Globals.NetworkOP.OP_ADDBOMB,
-                                                 pickle.dumps((self.ID, self.x, self.y)), player.Address)
-
-
-    def Draw(self, Screen):
+    def Draw(self,Delta,Screen):
         if not(self.Used) :
             return
         pygame.draw.rect(Screen, (0, 0, 255), (self.x, self.y, 32, 32), 1)
-        Screen.blit(ImageCache['Player'], (self.x, self.y))
-        
+        if self.Dir == self.Direction.DIR_FRONT :
+            Screen.blit(ImageCache['PlayerFront'], (self.x, self.y))
+        if self.Dir == self.Direction.DIR_BACK :
+            Screen.blit(ImageCache['PlayerBack'], (self.x, self.y))
+        if self.Dir == self.Direction.DIR_LEFT:
+            Screen.blit(ImageCache['PlayerSideLeft'], (self.x, self.y))
+        if self.Dir == self.Direction.DIR_RIGHT :
+            Screen.blit(ImageCache['PlayerSideRight'], (self.x, self.y))
+    def ChangeSpeed(self,NSpeed):
+        Temp = self.Speed + NSpeed
+        if( Temp > self.MAX_SPEED or Temp <= 0) :
+            return
+        self.Speed = Temp
     # Init a new player at given position.
     def __init__(self, x=0, y=0):
         self.x = x
@@ -190,6 +245,12 @@ class Player(object):
         self.Address = ('0.0.0.0', 0)
         self.Used = False
         self.NumKills = 0
+        self.Speed = 8
+        self.NumBombs = 1
+        self.BombRange = 16
+        self.NumUsedBombs = 0
+        self.Dir = self.Direction.DIR_FRONT
+        self.MAX_SPEED = 56
 
 # MainPlayer = None
 class NetChannel():
@@ -335,6 +396,8 @@ def StartNewGame():
                 # Assign it to us.
                 player.ID = NetInterface.ID
                 player.Used = True
+                player.x += 32
+                player.y -= 32
                 print("StartNewGame: ", GetConnectedPlayers())
                 return
 def GetMainPlayer():
@@ -354,7 +417,7 @@ def CheckGameEvent():
         if Event.type == pygame.KEYDOWN :
             if Event.key == pygame.K_ESCAPE :
                 Globals.GameIsRunning = False
-            GetMainPlayer().Move(Event.key)
+    GetMainPlayer().Move(0)
 
 def CheckMenuEvent(Screen, MenuFont):
     for Event in pygame.event.get():
@@ -397,7 +460,10 @@ def CheckMenuEvent(Screen, MenuFont):
                             NetInterface.Challenging = True
                             NetInterface.WriteOp(Globals.NetworkOP.OP_CHALLENGE, 0,
                                                  (InputTextBox.get_text(), NetInterface.Port))
-       # if Event.type == pygame.KEYDOWN :
+        if Event.type == pygame.KEYDOWN :
+           if Event.key == pygame.K_RETURN :
+               if pygame.key.get_mods() & pygame.KMOD_ALT :
+                   pygame.display.toggle_fullscreen()
 
 # def MapFindPlayerSpawn():
     # for Position in PSpawn :
@@ -426,7 +492,7 @@ def DrawMap(Map, Screen):
         if Tile.Remove == True :
             Map.remove(Tile)
             continue
-        Screen.blit(ImageCache['FixedTile'], (Tile.x, Tile.y))
+        Tile.Draw(Screen);
     for Bomb in BombList :
         if Bomb.Time <= 0 :
             # Explode!
@@ -517,6 +583,18 @@ def CheckExitCondition(gameDisplay,ExitDictionary):
       NumFrames += 1
       return True
     return False
+def CacheTextures() :
+    LoadImage("PlayerFront", "Textures/PlayerFront.png")
+    LoadImage("PlayerBack", "Textures/PlayerBack.png")
+    LoadImage("PlayerSideLeft", "Textures/PlayerSideLeft.png")
+    LoadImage("PlayerSideRight", "Textures/PlayerSideRight.png")
+    LoadImage("FixedTile", "Textures/Brick.png")
+    LoadImage("DestructibleTile", "Textures/Player.png")
+    LoadImage("Bomb", "Textures/Bomb32.png")
+    LoadImage("BombAnim", "Textures/Explosion.png")
+    LoadImage("PW_BOMB", "Textures/BombPowerUp.png")
+    LoadImage("PW_SPEED", "Textures/SpeedPowerUp.png")
+    LoadImage("PW_RANGE", "Textures/RangePowerUp.png")
 
 def main():
     pygame.init()
@@ -528,11 +606,7 @@ def main():
     Background.fill((75, 111, 77))
     pygame.display.set_caption('PyBomberman')
     clock = pygame.time.Clock()
-    LoadImage("Player", "Textures/Player.png")
-    LoadImage("FixedTile", "Textures/Brick.png")
-    LoadImage("DestructibleTile", "Textures/Player.png")
-    LoadImage("Bomb", "Textures/Bomb32.png")
-    LoadImage("BombAnim", "Textures/Explosion.png")
+    CacheTextures()
     InitMenu(MenuFont)
     ExitDictionary = {};
     WinLabel = GameFont.render("YOU WIN!", 1, (255, 0, 0))
@@ -543,9 +617,14 @@ def main():
     WaitPlayersRect = WaitPlayersLabel.get_rect(center=(Globals.SCREENWIDTH/2,Globals.SCREENHEIGHT/2))
     ExitDictionary['Win'] = [WinLabel,WinRect]
     ExitDictionary['GameOver'] = [GameOverLabel,GameOverRect]
-
+    StartTime = pygame.time.get_ticks()
     while(Globals.HasToQuit != True) :
-
+        #Delta computation.
+        Optimal_Time_Seconds = 1000 / 60.0;
+        UpdateLength = pygame.time.get_ticks() - StartTime
+        Delta = UpdateLength / Optimal_Time_Seconds
+        if( ( pygame.time.get_ticks() - StartTime ) >= 1000 ) :
+            StartTime = pygame.time.get_ticks()
         # Clear the bg.
         gameDisplay.blit(Background, (0, 0))
         NetInterface.GetPackets()
@@ -556,17 +635,19 @@ def main():
         else :
             CheckGameEvent()
             if( not(CheckExitCondition(gameDisplay,ExitDictionary)) ) :
-                if( GetConnectedPlayers() > 1 ) :
+                #if( GetConnectedPlayers() > 1 ) :
+                if 1 :
                  DrawMap(Map, gameDisplay)
                  for player in Players :
-                     player.Draw(gameDisplay)
+                     player.Draw(Delta,gameDisplay)
                  SendPlayerPos()
                 else :
                   gameDisplay.blit(WaitPlayersLabel,WaitPlayersRect)
 
         clock.tick(60)
-        label = GameFont.render("FPS:{f:.2f} || Bomb:{d}"
-                                .format(f=clock.get_fps(), d=len(BombList)), 1, (255, 0, 0))
+        LocalSpeed = 0 if GetMainPlayer() == None  else GetMainPlayer().Speed
+        label = GameFont.render("FPS:{f:.2f} || Bomb:{d} || Speed:{s}"
+                                .format(f=clock.get_fps(), d=len(BombList),s=LocalSpeed), 1, (255, 0, 0))
         gameDisplay.blit(label, (0, 0))
         pygame.display.flip()
     pygame.quit()

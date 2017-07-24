@@ -15,5 +15,11 @@ class NetworkOP(enum.IntEnum):
     OP_DIED = 9 # Value => ID
     OP_DISCONNECT = 6
 
-SCREENWIDTH = 960
-SCREENHEIGHT = 640
+class PowerupType(enum.IntEnum):
+    PW_NONE = 1
+    PW_BOMB = 2 # Increase Max number of bomb that can be placed
+    PW_SPEED = 3 # Increase player speed
+    PW_RANGE = 4 # Increase bomb range
+
+SCREENWIDTH = 1366#960
+SCREENHEIGHT = 768#640
